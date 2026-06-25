@@ -1,0 +1,124 @@
+// LOAD LANDSAT 8 IMAGE FOR 2015
+
+var L8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2");
+
+var image_2015 = L8.filterBounds(aoi) // Filter by AOI
+            .filterDate('2015-01-10', '2015-03-25') // Select time range
+            .filterMetadata('CLOUD_COVER', 'less_than', 2) // Remove cloudy images
+            .mean() // Get mean composite
+            .clip(aoi); // Clip to AOI
+
+// Visualization parameters
+var visParams = {bands: ['SR_B4', 'SR_B3', 'SR_B2'], min: 0, max: 30000, gamma: 1.4};
+Map.addLayer(image_2015, visParams, 'True Color 2015');
+
+
+
+var classname = water.merge(vegetation).merge(urban);
+print(classname);
+
+var bands = ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'];
+var training = image_2015.select(bands).sampleRegions({
+  collection: classname,
+  properties: ['landcover'],
+  scale: 30
+});
+
+print(training);
+
+
+// TRAIN RANDOM FOREST CLASSIFIER
+
+var classifier = ee.Classifier.smileRandomForest(100).train({
+  features: training,
+  classProperty: 'landcover',
+  inputProperties: bands
+});
+
+// Classify the image
+var classified_2015 = image_2015.select(bands).classify(classifier);
+Map.centerObject(aoi, 11);
+Map.addLayer(classified_2015, {min: 0, max: 2, palette: ['#0e58bd', '#89d209', '#9bb3f0']}, 'Random Forest 2015');
+
+var random_column = training.randomColumn();
+var split = 0.7; // Define the split ratio
+var trainingData = random_column.filter(ee.Filter.lt('random', split)); // 70% for training
+var testingData = random_column.filter(ee.Filter.gte('random', split)); // 30% for testing
+
+print('Training Data:', trainingData);
+print('Testing Data:', testingData);
+
+// Train classifier on training data
+var trainedClassifier = ee.Classifier.smileRandomForest(100).train({
+  features: trainingData,
+  classProperty: 'landcover',
+  inputProperties: bands
+});
+
+
+// Test accuracy
+var testAccuracy = testingData.classify(trainedClassifier);
+var confusionMatrix = testAccuracy.errorMatrix('landcover', 'classification');
+
+print('Confusion Matrix:', confusionMatrix);
+print('Overall Accuracy:', confusionMatrix.accuracy());
+print('Kappa Coefficient:', confusionMatrix.kappa());
+
+// // // UANTIFY URBAN AREAS
+
+// var urbanClass_2015 = classified_2015.eq(2); // Urban areas (modify if needed)
+
+// var urbanArea_2015 = urbanClass_2015.multiply(ee.Image.pixelArea());
+
+// var urbanStats_2015 = urbanArea_2015.reduceRegion({
+//   reducer: ee.Reducer.sum(),
+//   geometry: aoi,
+//   scale: 30,
+//   maxPixels: 1e13
+// });
+
+// // Convert to square kilometers
+// var urbanAreaSqKm_2015 = ee.Number(urbanStats_2015.get('classification')).divide(1e6);
+// print('Total Urban Area in 2015 (sq. km):', urbanAreaSqKm_2015);
+
+
+//CONVERT TO VECTOR (SHAPEFILE)
+
+// var urbanVector_2015 = urbanClass_2015.selfMask().reduceToVectors({
+//   geometry: aoi,
+//   geometryType: 'polygon',
+//   reducer: ee.Reducer.countEvery(),
+//   scale: 30,
+//   maxPixels: 1e13
+// });
+
+// Map.addLayer(urbanVector_2015, {color: 'red'}, 'Urban Vector 2015');
+
+
+// //EXPORT AS SHAPEFILE
+
+// Export.table.toDrive({
+//   collection: urbanVector_2015,
+//   description: 'Urban_Areas_2015',
+//   fileFormat: 'SHP'
+// });
+
+
+// Reclassify to Urban (1) and Non-Urban (0)
+
+// var binaryClass_2015 = classified_2015.eq(2)  // Class 2 = Urban
+//                         .rename('Urban_NonUrban');
+
+// Map.addLayer(binaryClass_2015, {min: 0, max: 1, palette: ['white', 'red']}, 'Urban vs Non-Urban 2015');
+
+// Export Binary Classified Image (GeoTIFF)
+
+Export.image.toDrive({
+  image: classified_2015,
+  description: 'Binary_Urban_NonUrban_2015',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Classified_2015',
+  region: aoi.geometry(),
+  scale: 30,
+  maxPixels: 1e13
+});
